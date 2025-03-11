@@ -7,11 +7,30 @@ using System.Net.Http;
 using System.Threading.Tasks;
 "@
 
+# Function to load configuration from JSON file
+Function Load-Config {
+    $configPath = "config.json"
+    if (Test-Path -Path $configPath) {
+        $config = Get-Content -Path $configPath | ConvertFrom-Json
+        return $config
+    }
+    else {
+        Write-Error "Config file not found!"
+        return $null
+    }
+}
+
 # Function to get OAuth access token using client credentials flow
 Function Get-AccessToken {
-    $tenantId = ""
-    $clientId = ""
-    $clientSecret = ""
+    $config = Load-Config
+    if ($config -eq $null) {
+        Write-Error "Failed to load configuration. Cannot continue."
+        return
+    }
+    
+    $tenantId = $config.tenantId
+    $clientId = $config.clientId
+    $clientSecret = $config.clientSecret
     $scope = "https://graph.microsoft.com/.default"
     $url = "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token"
     
@@ -22,9 +41,58 @@ Function Get-AccessToken {
         scope         = $scope
     }
     
-    $response = Invoke-RestMethod -Uri $url -Method Post -ContentType "application/x-www-form-urlencoded" -Body $body
-    return $response.access_token
+    try {
+        $response = Invoke-RestMethod -Uri $url -Method Post -ContentType "application/x-www-form-urlencoded" -Body $body
+        return $response.access_token
+    }
+    catch {
+        # Capture the error message
+        $errorMessage = "Authentication failed: $_"
+        Write-Error $errorMessage
+        return $errorMessage
+    }
 }
+
+# Function to get the tenant's organization information
+Function Get-TenantInfo {
+    param (
+        [string]$accessToken
+    )
+    
+    $url = "https://graph.microsoft.com/v1.0/organization"
+    $headers = @{
+        Authorization = "Bearer $accessToken"
+    }
+    
+    try {
+        $response = Invoke-RestMethod -Uri $url -Method Get -Headers $headers
+        return $response.value[0].displayName
+    }
+    catch {
+        Write-Error "Failed to retrieve tenant information: $_"
+        return "Unknown Tenant"
+    }
+}
+
+# Function to show an error message box with detailed error
+Function Show-ErrorMessage {
+    param (
+        [string]$message
+    )
+    
+    [System.Windows.Forms.MessageBox]::Show($message, "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+}
+
+# Authentication check before displaying the GUI
+$accessToken = Get-AccessToken
+if ($accessToken -like "Authentication failed:*") {
+    # If authentication failed, show the error message and exit
+    Show-ErrorMessage -message $accessToken
+    exit
+}
+
+# Get the tenant info (tenant name)
+$tenantName = Get-TenantInfo -accessToken $accessToken
 
 # Function to get OneDrive items (files/folders) for a specific user
 Function Get-OneDriveItems {
@@ -138,10 +206,17 @@ $form.FormBorderStyle = 'FixedDialog'   # Make the window non-resizable
 $form.MaximizeBox = $false              # Disable maximize button
 $form.MinimizeBox = $false             # Disable minimize button
 
+# Tenant Name Label (top of the form)
+$tenantNameLabel = New-Object System.Windows.Forms.Label
+$tenantNameLabel.Text = "Tenant: $tenantName"
+$tenantNameLabel.Location = New-Object System.Drawing.Point(10, 10)
+$tenantNameLabel.Size = New-Object System.Drawing.Size(580, 20)
+$form.Controls.Add($tenantNameLabel)
+
 # User Email Input
 $emailLabel = New-Object System.Windows.Forms.Label
 $emailLabel.Text = "Enter the user's email address:"
-$emailLabel.Location = New-Object System.Drawing.Point(10, 20)
+$emailLabel.Location = New-Object System.Drawing.Point(10, 40)
 $emailLabel.Size = New-Object System.Drawing.Size(580, 20)  # Adjusted width of label to avoid clipping
 $form.Controls.Add($emailLabel)
 
@@ -169,12 +244,12 @@ $browseButton.Location = New-Object System.Drawing.Point(420, 130)
 $form.Controls.Add($browseButton)
 
 $browseButton.Add_Click({
-    $folderDialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $folderDialog.ShowNewFolderButton = $true
-    if ($folderDialog.ShowDialog() -eq 'OK') {
-        $pathTextBox.Text = $folderDialog.SelectedPath
-    }
-})
+        $folderDialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $folderDialog.ShowNewFolderButton = $true
+        if ($folderDialog.ShowDialog() -eq 'OK') {
+            $pathTextBox.Text = $folderDialog.SelectedPath
+        }
+    })
 
 # Zip Output Path Input
 $zipPathLabel = New-Object System.Windows.Forms.Label
@@ -195,12 +270,12 @@ $zipBrowseButton.Location = New-Object System.Drawing.Point(420, 200)
 $form.Controls.Add($zipBrowseButton)
 
 $zipBrowseButton.Add_Click({
-    $folderDialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $folderDialog.ShowNewFolderButton = $true
-    if ($folderDialog.ShowDialog() -eq 'OK') {
-        $zipPathTextBox.Text = $folderDialog.SelectedPath
-    }
-})
+        $folderDialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $folderDialog.ShowNewFolderButton = $true
+        if ($folderDialog.ShowDialog() -eq 'OK') {
+            $zipPathTextBox.Text = $folderDialog.SelectedPath
+        }
+    })
 
 # Log Textbox to display download progress
 $logTextBox = New-Object System.Windows.Forms.TextBox
@@ -224,41 +299,42 @@ $form.Controls.Add($downloadAndZipButton)
 
 # Button Events
 $downloadAndZipButton.Add_Click({
-    # Clear previous logs
-    $logTextBox.Clear()
-    $progressBar.Value = 0
+        # Clear previous logs
+        $logTextBox.Clear()
+        $progressBar.Value = 0
 
-    # Get the access token
-    $accessToken = Get-AccessToken
+        # Get the access token
+        $accessToken = Get-AccessToken
     
-    # Get the OneDrive items
-    $email = $emailTextBox.Text
-    $downloadPath = $pathTextBox.Text
-    $zipOutputPath = $zipPathTextBox.Text
+        # Get the OneDrive items
+        $email = $emailTextBox.Text
+        $downloadPath = $pathTextBox.Text
+        $zipOutputPath = $zipPathTextBox.Text
     
-    if (![string]::IsNullOrEmpty($email) -and ![string]::IsNullOrEmpty($downloadPath) -and ![string]::IsNullOrEmpty($zipOutputPath)) {
-        # Log starting message
-        $logTextBox.AppendText("Starting download process...`r`n")
+        if (![string]::IsNullOrEmpty($email) -and ![string]::IsNullOrEmpty($downloadPath) -and ![string]::IsNullOrEmpty($zipOutputPath)) {
+            # Log starting message
+            $logTextBox.AppendText("Starting download process...`r`n")
         
-        # Create a reference variable for total items
-        $totalItems = 0
+            # Create a reference variable for total items
+            $totalItems = 0
         
-        # Download all files from OneDrive recursively
-        Download-AllFiles -email $email -accessToken $accessToken -parentId "root" -downloadPath $downloadPath -logTextBox $logTextBox -progressBar $progressBar -totalItems ([ref]$totalItems)
+            # Download all files from OneDrive recursively
+            Download-AllFiles -email $email -accessToken $accessToken -parentId "root" -downloadPath $downloadPath -logTextBox $logTextBox -progressBar $progressBar -totalItems ([ref]$totalItems)
         
-        # Log completion message
-        $logTextBox.AppendText("Download complete. Zipping files...`r`n")
+            # Log completion message
+            $logTextBox.AppendText("Download complete. Zipping files...`r`n")
         
-        # Zip the downloaded folder
-        $zipPath = Join-Path -Path $zipOutputPath -ChildPath "$($email)_OneDrive_Backup.zip"
-        Zip-Folder -folderPath $downloadPath -zipPath $zipPath
+            # Zip the downloaded folder
+            $zipPath = Join-Path -Path $zipOutputPath -ChildPath "$($email)_OneDrive_Backup.zip"
+            Zip-Folder -folderPath $downloadPath -zipPath $zipPath
         
-        # Log success
-        $logTextBox.AppendText("Files downloaded and zipped successfully!`r`n")
-    } else {
-        $logTextBox.AppendText("Please enter all required fields.`r`n")
-    }
-})
+            # Log success
+            $logTextBox.AppendText("Files downloaded and zipped successfully!`r`n")
+        }
+        else {
+            $logTextBox.AppendText("Please fill in all fields before proceeding.`r`n")
+        }
+    })
 
-# Run the Form
+# Show the form
 $form.ShowDialog()
