@@ -27,26 +27,25 @@ Function Get-AccessToken {
         Write-Error "Failed to load configuration. Cannot continue."
         return
     }
-    
+
     $tenantId = $config.tenantId
     $clientId = $config.clientId
     $clientSecret = $config.clientSecret
     $scope = "https://graph.microsoft.com/.default"
     $url = "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token"
-    
+
     $body = @{
         grant_type    = "client_credentials"
         client_id     = $clientId
         client_secret = $clientSecret
         scope         = $scope
     }
-    
+
     try {
         $response = Invoke-RestMethod -Uri $url -Method Post -ContentType "application/x-www-form-urlencoded" -Body $body
         return $response.access_token
     }
     catch {
-        # Capture the error message
         $errorMessage = "Authentication failed: $_"
         Write-Error $errorMessage
         return $errorMessage
@@ -58,12 +57,12 @@ Function Get-TenantInfo {
     param (
         [string]$accessToken
     )
-    
+
     $url = "https://graph.microsoft.com/v1.0/organization"
     $headers = @{
         Authorization = "Bearer $accessToken"
     }
-    
+
     try {
         $response = Invoke-RestMethod -Uri $url -Method Get -Headers $headers
         return $response.value[0].displayName
@@ -79,20 +78,9 @@ Function Show-ErrorMessage {
     param (
         [string]$message
     )
-    
+
     [System.Windows.Forms.MessageBox]::Show($message, "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
 }
-
-# Authentication check before displaying the GUI
-$accessToken = Get-AccessToken
-if ($accessToken -like "Authentication failed:*") {
-    # If authentication failed, show the error message and exit
-    Show-ErrorMessage -message $accessToken
-    exit
-}
-
-# Get the tenant info (tenant name)
-$tenantName = Get-TenantInfo -accessToken $accessToken
 
 # Function to get OneDrive items (files/folders) for a specific user
 Function Get-OneDriveItems {
@@ -101,12 +89,12 @@ Function Get-OneDriveItems {
         [string]$accessToken,
         [string]$parentId = "root"
     )
-    
+
     $url = "https://graph.microsoft.com/v1.0/users/$email/drive/items/$parentId/children"
     $headers = @{
         Authorization = "Bearer $accessToken"
     }
-    
+
     $response = Invoke-RestMethod -Uri $url -Method Get -Headers $headers
     return $response.value
 }
@@ -117,7 +105,7 @@ Function Download-File {
         [string]$downloadUrl,
         [string]$destination
     )
-    
+
     $client = New-Object System.Net.Http.HttpClient
     $response = $client.GetAsync($downloadUrl).Result
     $fileStream = [System.IO.File]::Create($destination)
@@ -136,13 +124,11 @@ Function Download-AllFiles {
         [System.Windows.Forms.ProgressBar]$progressBar,
         [ref]$totalItems
     )
-    
+
     $items = Get-OneDriveItems -email $email -accessToken $accessToken -parentId $parentId
 
-    # Initialize totalItems only when items are retrieved
     $totalItems.Value = $items.Count
 
-    # Ensure the totalItems is greater than 0 before starting the download
     if ($totalItems.Value -gt 0) {
         $currentItem = 0
         foreach ($item in $items) {
@@ -150,33 +136,23 @@ Function Download-AllFiles {
             $itemId = $item.id
             $itemDownloadUrl = $item."@microsoft.graph.downloadUrl"
             $itemIsFolder = $item.folder -ne $null
-            
+
             $currentItem++
-            
-            # Update progress bar only if totalItems is greater than 0
+
             if ($totalItems.Value -gt 0) {
-                # Clamp the value between 0 and 100 to prevent exceeding the valid range
                 $progressBar.Value = [Math]::Min(100, [Math]::Max(0, ($currentItem / $totalItems.Value) * 100))
             }
-            
+
             if ($itemIsFolder) {
-                # Log folder
                 $logTextBox.AppendText("Found folder: $itemName`r`n")
-                
-                # Create the folder in the download path if it doesn't exist
                 $folderPath = Join-Path -Path $downloadPath -ChildPath $itemName
                 if (-not (Test-Path -Path $folderPath)) {
                     New-Item -ItemType Directory -Path $folderPath
                 }
-                
-                # Recursively download files inside this folder
                 Download-AllFiles -email $email -accessToken $accessToken -parentId $itemId -downloadPath $folderPath -logTextBox $logTextBox -progressBar $progressBar -totalItems $totalItems
             }
             else {
-                # Log file being downloaded
                 $logTextBox.AppendText("Downloading file: $itemName`r`n")
-                
-                # Download the file
                 $filePath = Join-Path -Path $downloadPath -ChildPath $itemName
                 Download-File -downloadUrl $itemDownloadUrl -destination $filePath
             }
@@ -193,22 +169,21 @@ Function Zip-Folder {
         [string]$folderPath,
         [string]$zipPath
     )
-    
-    # Create the zip file
+
     [System.IO.Compression.ZipFile]::CreateFromDirectory($folderPath, $zipPath)
 }
 
 # Create the Windows Form
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "OneDrive Downloader"
-$form.Size = New-Object System.Drawing.Size(600, 550)  # Reduced height
-$form.FormBorderStyle = 'FixedDialog'   # Make the window non-resizable
-$form.MaximizeBox = $false              # Disable maximize button
-$form.MinimizeBox = $false             # Disable minimize button
+$form.Size = New-Object System.Drawing.Size(600, 550)  
+$form.FormBorderStyle = 'FixedDialog'   
+$form.MaximizeBox = $false              
+$form.MinimizeBox = $false             
 
-# Tenant Name Label (top of the form)
+# Tenant Name Label
 $tenantNameLabel = New-Object System.Windows.Forms.Label
-$tenantNameLabel.Text = "Tenant: $tenantName"
+$tenantNameLabel.Text = "Tenant: $(Get-TenantInfo -accessToken (Get-AccessToken))"
 $tenantNameLabel.Location = New-Object System.Drawing.Point(10, 10)
 $tenantNameLabel.Size = New-Object System.Drawing.Size(580, 20)
 $form.Controls.Add($tenantNameLabel)
@@ -217,23 +192,23 @@ $form.Controls.Add($tenantNameLabel)
 $emailLabel = New-Object System.Windows.Forms.Label
 $emailLabel.Text = "Enter the user's email address:"
 $emailLabel.Location = New-Object System.Drawing.Point(10, 40)
-$emailLabel.Size = New-Object System.Drawing.Size(580, 20)  # Adjusted width of label to avoid clipping
+$emailLabel.Size = New-Object System.Drawing.Size(580, 20)  
 $form.Controls.Add($emailLabel)
 
 $emailTextBox = New-Object System.Windows.Forms.TextBox
-$emailTextBox.Location = New-Object System.Drawing.Point(10, 60)  # Increased padding from top
+$emailTextBox.Location = New-Object System.Drawing.Point(10, 60)
 $emailTextBox.Width = 400
 $form.Controls.Add($emailTextBox)
 
 # Download Path Input
 $pathLabel = New-Object System.Windows.Forms.Label
 $pathLabel.Text = "Enter the download path:"
-$pathLabel.Location = New-Object System.Drawing.Point(10, 100)  # Increased padding from top
-$pathLabel.Size = New-Object System.Drawing.Size(580, 20)  # Adjusted width of label to avoid clipping
+$pathLabel.Location = New-Object System.Drawing.Point(10, 100)
+$pathLabel.Size = New-Object System.Drawing.Size(580, 20)  
 $form.Controls.Add($pathLabel)
 
 $pathTextBox = New-Object System.Windows.Forms.TextBox
-$pathTextBox.Location = New-Object System.Drawing.Point(10, 130)  # Increased padding from top
+$pathTextBox.Location = New-Object System.Drawing.Point(10, 130)
 $pathTextBox.Width = 400
 $form.Controls.Add($pathTextBox)
 
@@ -254,12 +229,12 @@ $browseButton.Add_Click({
 # Zip Output Path Input
 $zipPathLabel = New-Object System.Windows.Forms.Label
 $zipPathLabel.Text = "Select the output folder for the ZIP file:"
-$zipPathLabel.Location = New-Object System.Drawing.Point(10, 170)  # Increased padding from top
-$zipPathLabel.Size = New-Object System.Drawing.Size(580, 20)  # Adjusted width of label to avoid clipping
+$zipPathLabel.Location = New-Object System.Drawing.Point(10, 170)
+$zipPathLabel.Size = New-Object System.Drawing.Size(580, 20)  
 $form.Controls.Add($zipPathLabel)
 
 $zipPathTextBox = New-Object System.Windows.Forms.TextBox
-$zipPathTextBox.Location = New-Object System.Drawing.Point(10, 200)  # Increased padding from top
+$zipPathTextBox.Location = New-Object System.Drawing.Point(10, 200)
 $zipPathTextBox.Width = 400
 $form.Controls.Add($zipPathTextBox)
 
@@ -279,22 +254,22 @@ $zipBrowseButton.Add_Click({
 
 # Log Textbox to display download progress
 $logTextBox = New-Object System.Windows.Forms.TextBox
-$logTextBox.Location = New-Object System.Drawing.Point(10, 250)  # Adjusted Y value for better spacing
+$logTextBox.Location = New-Object System.Drawing.Point(10, 250)  
 $logTextBox.Size = New-Object System.Drawing.Size(560, 150)
 $logTextBox.Multiline = $true
 $logTextBox.ScrollBars = 'Vertical'
 $form.Controls.Add($logTextBox)
 
-# Progress Bar to display download progress
+# Progress Bar
 $progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = New-Object System.Drawing.Point(10, 420)  # Adjusted Y value for better spacing
+$progressBar.Location = New-Object System.Drawing.Point(10, 420)  
 $progressBar.Size = New-Object System.Drawing.Size(560, 30)
 $form.Controls.Add($progressBar)
 
-# Start Download and Zip Button
+# Create the Download and Zip button
 $downloadAndZipButton = New-Object System.Windows.Forms.Button
 $downloadAndZipButton.Text = "Download and Zip"
-$downloadAndZipButton.Location = New-Object System.Drawing.Point(10, 460)  # Adjusted Y value for better spacing
+$downloadAndZipButton.Location = New-Object System.Drawing.Point(10, 460)  
 $form.Controls.Add($downloadAndZipButton)
 
 # Button Events
@@ -305,29 +280,35 @@ $downloadAndZipButton.Add_Click({
 
         # Get the access token
         $accessToken = Get-AccessToken
-    
+
         # Get the OneDrive items
         $email = $emailTextBox.Text
         $downloadPath = $pathTextBox.Text
         $zipOutputPath = $zipPathTextBox.Text
-    
+
         if (![string]::IsNullOrEmpty($email) -and ![string]::IsNullOrEmpty($downloadPath) -and ![string]::IsNullOrEmpty($zipOutputPath)) {
             # Log starting message
             $logTextBox.AppendText("Starting download process...`r`n")
-        
+
             # Create a reference variable for total items
             $totalItems = 0
-        
+
             # Download all files from OneDrive recursively
             Download-AllFiles -email $email -accessToken $accessToken -parentId "root" -downloadPath $downloadPath -logTextBox $logTextBox -progressBar $progressBar -totalItems ([ref]$totalItems)
-        
+
             # Log completion message
             $logTextBox.AppendText("Download complete. Zipping files...`r`n")
-        
+
+            # Get today's date
+            $todayDate = Get-Date -Format "yyyy-MM-dd"
+
+            # Generate the zip file path with today's date
+            $zipFileName = "$($email)_OneDrive_Backup_$todayDate.zip"
+            $zipPath = Join-Path -Path $zipOutputPath -ChildPath $zipFileName
+
             # Zip the downloaded folder
-            $zipPath = Join-Path -Path $zipOutputPath -ChildPath "$($email)_OneDrive_Backup.zip"
             Zip-Folder -folderPath $downloadPath -zipPath $zipPath
-        
+
             # Log success
             $logTextBox.AppendText("Files downloaded and zipped successfully!`r`n")
         }
