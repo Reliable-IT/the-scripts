@@ -30,8 +30,20 @@ Import-Module AzureAD
 
 # Function to login as Global Administrator (interactive login)
 function Login-GlobalAdministrator {
-    # Perform interactive login to Microsoft Graph
-    Connect-MgGraph -Scopes "Directory.AccessAsUser.All", "User.ReadWrite.All", "Policy.ReadWrite.ApplicationConfiguration"
+    try {
+        # Disconnect any existing sessions first (force re-login)
+        Disconnect-MgGraph
+        
+        # Perform interactive login to Microsoft Graph with specific permissions requested
+        Connect-MgGraph -Scopes "Directory.Read.All", "User.Read.All", "Organization.Read.All"
+        
+        Write-Host "Successfully logged in as Global Administrator."
+    }
+    catch {
+        Write-Host "Login failed: $($_.Exception.Message)"
+        return $false
+    }
+    return $true
 }
 
 # Function to get self-service product details (fetch all and filter locally)
@@ -40,10 +52,12 @@ function Get-SelfServiceProducts {
         # Query Microsoft Graph to get all subscriptions
         $subscriptions = Get-MgSubscribedSku
         
-        # Filter the subscriptions locally by checking enabled prepaid units
-        $filteredSubscriptions = $subscriptions | Where-Object { $_.PrepaidUnits.Enabled -gt 0 }
+        # Filter for self-service products based on ServiceName or SKU Name
+        $selfServiceSubscriptions = $subscriptions | Where-Object { 
+            $_.ServicePlans -match "Self-service" -or $_.SkuPartNumber -like "*Trial*" 
+        }
 
-        return $filteredSubscriptions
+        return $selfServiceSubscriptions
     }
     catch {
         Write-Host "Error fetching self-service products: $($_.Exception.Message)"
@@ -51,87 +65,90 @@ function Get-SelfServiceProducts {
     }
 }
 
-# Function to disable selected trials
-function Disable-SelectedTrials {
+# Function to get users assigned to a specific SKU
+function Get-UsersAssignedToSelfServiceLicense {
     param (
         [Parameter(Mandatory = $true)]
-        [array]$selectedTrials
+        [string]$skuId
     )
-
+    
     try {
-        foreach ($trial in $selectedTrials) {
-            Write-Host "Disabling trial for product: $($trial.SkuPartNumber)"
-            # You can implement your logic to disable a self-service trial here.
-            # For now, we will simply display the product being disabled.
-            # Example: Disable by removing subscription
-            # Remove-MgSubscribedSku -SubscribedSkuId $trial.Id
+        $users = Get-MgUser -Select "Id,DisplayName,AssignedLicenses"
+        $assignedUsers = @()
+        
+        foreach ($user in $users) {
+            foreach ($license in $user.AssignedLicenses) {
+                if ($license.SkuId -eq $skuId) {
+                    # Add the user and license assignment to the array
+                    $assignedUsers += [PSCustomObject]@{
+                        UserName = $user.DisplayName
+                        UserId   = $user.Id
+                    }
+                }
+            }
         }
-
-        Write-Host "Selected trials have been disabled successfully."
+        
+        return $assignedUsers
     }
     catch {
-        Write-Host "Error disabling trials: $($_.Exception.Message)"
+        Write-Host "Error fetching users assigned to self-service license: $($_.Exception.Message)"
+        return @()
     }
 }
 
-# Function to create and show a new UI with products list
-function Show-ProductsUI {
+# Function to create and show a new UI with products list and users in a table
+function Show-ProductsWithUsersUI {
     $selfServiceProducts = Get-SelfServiceProducts
+
+    # Retrieve the tenant's name
+    $tenantInfo = Get-MgOrganization
+    $tenantName = $tenantInfo.DisplayName
 
     # Create new form for displaying self-service products
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Self-Service Products"
-    $form.Size = New-Object System.Drawing.Size(600, 400)
+    $form.Text = "Self-Service Products and Assigned Users"
+    $form.Size = New-Object System.Drawing.Size(800, 600)
 
-    # Create a label for status
-    $statusLabel = New-Object System.Windows.Forms.Label
-    $statusLabel.Size = New-Object System.Drawing.Size(550, 40)
-    $statusLabel.Location = New-Object System.Drawing.Point(25, 20)
-    $statusLabel.Text = "List of Active Self-Service Products and Trials"
-    $form.Controls.Add($statusLabel)
+    # Create a label for tenancy name
+    $tenantLabel = New-Object System.Windows.Forms.Label
+    $tenantLabel.Size = New-Object System.Drawing.Size(750, 30)
+    $tenantLabel.Location = New-Object System.Drawing.Point(25, 25)
+    $tenantLabel.Text = "Tenant: $tenantName"
+    $form.Controls.Add($tenantLabel)
 
-    # Create a CheckedListBox for displaying available self-service products
-    $productCheckListBox = New-Object System.Windows.Forms.CheckedListBox
-    $productCheckListBox.Size = New-Object System.Drawing.Size(550, 200)
-    $productCheckListBox.Location = New-Object System.Drawing.Point(25, 60)
+    # Create a DataGridView to display the table
+    $dataGridView = New-Object System.Windows.Forms.DataGridView
+    $dataGridView.Size = New-Object System.Drawing.Size(750, 400)
+    $dataGridView.Location = New-Object System.Drawing.Point(25, 60)
+    
+    # Set DataGridView properties
+    $dataGridView.AllowUserToAddRows = $false
+    $dataGridView.AllowUserToDeleteRows = $false
+    $dataGridView.ReadOnly = $true
+    $dataGridView.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $dataGridView.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
+    
+    # Define columns for the DataGridView (removed Date Purchased column)
+    $dataGridView.Columns.Add("LicenseName", "Self-Service License Display Name")
+    $dataGridView.Columns.Add("User", "User")
 
-    # Populate checked list box with product names and trial statuses
+    # Populate the DataGridView with self-service products and their assigned users
     foreach ($product in $selfServiceProducts) {
-        $productInfo = "$($product.SkuPartNumber) - $($product.SkuId) (Enabled: $($product.PrepaidUnits.Enabled))"
-        $productCheckListBox.Items.Add($productInfo, $false)
+        $assignedUsers = Get-UsersAssignedToSelfServiceLicense -skuId $product.SkuId
+        
+        foreach ($user in $assignedUsers) {
+            # Add row to DataGridView (no SKU column or Date Purchased column)
+            $dataGridView.Rows.Add($product.SkuPartNumber, $user.UserName)
+        }
     }
 
-    $form.Controls.Add($productCheckListBox)
-
-    # Create a button to disable selected trials
-    $disableButton = New-Object System.Windows.Forms.Button
-    $disableButton.Size = New-Object System.Drawing.Size(200, 40)
-    $disableButton.Location = New-Object System.Drawing.Point(100, 280)
-    $disableButton.Text = "Disable Selected Trials"
-    $form.Controls.Add($disableButton)
-
-    # Button click to disable selected trials
-    $disableButton.Add_Click({
-            # Get selected trials from CheckedListBox
-            $selectedTrials = @()
-            foreach ($index in $productCheckListBox.CheckedIndices) {
-                $trial = $selfServiceProducts[$index]
-                $selectedTrials += $trial
-            }
-
-            # Disable selected trials
-            if ($selectedTrials.Count -gt 0) {
-                Disable-SelectedTrials -selectedTrials $selectedTrials
-            }
-            else {
-                [System.Windows.Forms.MessageBox]::Show("Please select at least one trial to disable.")
-            }
-        })
+    # Add DataGridView to form
+    $form.Controls.Add($dataGridView)
 
     # Create a button to close the form
     $closeButton = New-Object System.Windows.Forms.Button
     $closeButton.Size = New-Object System.Drawing.Size(100, 40)
-    $closeButton.Location = New-Object System.Drawing.Point(250, 330)
+    $closeButton.Location = New-Object System.Drawing.Point(350, 500)
     $closeButton.Text = "Close"
     $form.Controls.Add($closeButton)
 
@@ -144,7 +161,7 @@ function Show-ProductsUI {
     [void]$form.ShowDialog()
 }
 
-# Create the login form
+# Create the main form with login button
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Azure AD Admin Tool"
 $form.Size = New-Object System.Drawing.Size(400, 250)
@@ -156,34 +173,42 @@ $statusLabel.Location = New-Object System.Drawing.Point(25, 30)
 $statusLabel.Text = "Click below to login and manage self-service trials and purchases."
 $form.Controls.Add($statusLabel)
 
-# Create a button to perform the login and disable actions
-$actionButton = New-Object System.Windows.Forms.Button
-$actionButton.Size = New-Object System.Drawing.Size(200, 40)
-$actionButton.Location = New-Object System.Drawing.Point(100, 100)
-$actionButton.Text = "Login & Manage Trials"
-$form.Controls.Add($actionButton)
+# Create a button to perform the login and display table
+$loginButton = New-Object System.Windows.Forms.Button
+$loginButton.Size = New-Object System.Drawing.Size(200, 40)
+$loginButton.Location = New-Object System.Drawing.Point(100, 100)
+$loginButton.Text = "Login & Show Trials"
+$form.Controls.Add($loginButton)
 
-# Define button click behavior
-$actionButton.Add_Click({
+# Define login button click behavior
+$loginButton.Add_Click({
         try {
             # Disable the button while the task is running
-            $actionButton.Enabled = $false
+            $loginButton.Enabled = $false
             $statusLabel.Text = "Logging in..."
         
             # Perform login
-            Login-GlobalAdministrator
+            $loginSuccessful = Login-GlobalAdministrator
 
-            # Show the self-service products UI after login
-            Show-ProductsUI
+            if ($loginSuccessful) {
+                # Hide the main form (Azure AD Admin Tool)
+                $form.Close()
+
+                # Show the self-service products UI after login
+                Show-ProductsWithUsersUI
+            }
+            else {
+                $statusLabel.Text = "Login failed. Please try again."
+            }
         }
         catch {
             $statusLabel.Text = "Error occurred: $($_.Exception.Message)"
         }
         finally {
             # Re-enable the button after operation
-            $actionButton.Enabled = $true
+            $loginButton.Enabled = $true
         }
     })
 
-# Display the login form (this ensures the form shows)
+# Display the main form (this ensures the form shows)
 [void]$form.ShowDialog()
